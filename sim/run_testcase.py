@@ -299,7 +299,9 @@ class testcaseClass:
     logger.info(f'Simulating {top_module} with the {sim_tool} simulator')
     cur_dir = os.getcwd()
     os.chdir(sim_path)
-    os.system(f'./simulate.sh -top {top_module} -g {gui} -t {tc_name} -s {sim_tool}')
+    cmd = f'./simulate.sh -top {top_module} -g {gui} -t {tc_name} -s {sim_tool}'
+    logger.info(f'sim cmd:{cmd}')
+    os.system(cmd)
     os.chdir(cur_dir)
     logger.info(f'Finished simulation for {tc_name}')
 

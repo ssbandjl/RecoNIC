@@ -1,0 +1,291 @@
+git repo: https://github.com/ssbandjl/RecoNIC
+doc: https://cloud.tencent.com/developer/article/2414835
+Questa 模拟器 (questasim) 和 Vivado 模拟器 (xsim)
+
+git submodule update --init base_nics/open-nic-shell
+
+
+
+将 RecoNIC 集成到修改后的 OpenNIC shell 中并生成比特流(bs)
+cd ./scripts
+./gen_base_nic.sh -> git apply --whitespace=fix ${nic_patch}
+make build_nic -> build_tcl.py -nic rdma-opennic
+    create_tcl
+        fout.write("add_files {}\n".format(f))
+        for f in vhdl_files
+    vivado -mode batch -source build.tcl -tclargs -max_pkt_len 9600 -impl 1 -overwrite 1 -board_repo $(BOARD_REPO)
+    ...
+
+s
+download bs on fpga boad:
+$ cd scripts
+$ ./program_fpga.sh -b d8:00.0 -t target_name -r remote_hostname.sh
+    echo "clear SERR"
+    cmd_reg=$(sudo setpci -s $slot_num COMMAND)
+    setpci -s $slot_num COMMAND=$(printf "%04x" $(("0x$cmd_reg" & ~0x0100)))
+    vivado -mode tcl -source program_hw.tcl -tclargs -target_id $target_id -prog_file $prog_file -config_file $config_file -remote_host $remote_host
+
+
+
+build and install driver: -> drivers/onic-driver/Makefile
+    ONIC_OBJS = $(foreach CURR, $(SRC_FOLDERS), $(patsubst $(SUBDIRS)/$(CURR)/%.c, $(CURR)/%.o, $(wildcard $(SUBDIRS)/$(CURR)/*.c)))
+    EXTRA_CFLAGS += -DMBOX_INTERRUPT_DISABLE
+    make -C /lib/modules/$(ONIC_DRV_KVER)/build M=$(ONIC_DRV_HOME) SUBDIRS=$(shell pwd) modules -> drivers/onic-driver/onic_main.c -> module_init(onic_module_init)
+        libqdma_init -> Initialize QDMA Library
+            qdma_threads_create
+                qdma_kthread_start(thp, "qdma_cmpl_status_th", i)
+                    thp->task = kthread_create_on_node(xthread_main, (void *)thp, cpu_to_node(thp->cpu), "%s", thp->name)
+                        while (!kthread_should_stop())
+                            list_for_each_safe
+                                thp->fproc(work_item) -> qdma_thread_cmpl_status_proc
+                    kthread_bind(thp->task, thp->cpu)
+                    wake_up_process(thp->task)
+                thp->fproc = qdma_thread_cmpl_status_proc;
+                    descq = list_entry(work_item, struct qdma_descq, cmplthp_list) <- list_add_tail(&descq->cmplthp_list, &thp->work_list)
+                    qdma_descq_service_cmpl_update
+                        descq_process_completion_st_c2h
+                        qdma_descq_proc_sgt_request
+                        descq_mm_n_h2c_cmpl_status
+                        qdma_descq_proc_sgt_request
+                thp->fpending = qdma_thread_cmpl_status_pend;
+            qdma_debugfs_init(&qdma_debugfs_root)
+        pci_register_driver(&onic_pci_driver)
+        
+
+
+static struct pci_driver onic_pci_driver = {
+    .name = onic_drv_name,
+    .id_table = onic_pci_ids,
+    .probe = onic_pci_probe,
+    .remove = onic_pci_remove,
+};
+
+onic_pci_probe
+    onic_get_pinfo
+        sprintf(file_name, "onic_%4x.json", pdev->device)
+        onic_get_platform_info(file_name, pinfo)
+            snprintf(fw_name, sizeof(fw_name), "xilinx/%s", fname)
+            request_firmware -> request_firmware()是一套成熟的固件加载方案：将固件以二进制文件形式存储于文件系统之中，在内核启动后再从用户空间将固件传递至内核空间，解析固件获得参数，最后加载至硬件设备
+            jsmn_init(&parser)
+            numTokens = jsmn_parse(&parser, jsonBuffer, length, NULL, 0)
+            qdma_bar
+            user_bar
+            queue_base
+            pci_msix_user_cnt
+            poll_mode
+            mac_addr
+            ...
+    alloc_etherdev_mq
+    netdev->netdev_ops = &onic_netdev_ops
+    onic_set_ethtool_ops
+    onic_set_mac_address
+    onic_set_num_queue
+    netif_set_real_num_tx_queues
+    netif_set_real_num_rx_queues
+    xpriv->dma_req = KMEM_CACHE(onic_dma_request, 0)
+    onic_qdma_setup -> Control and Status Register (CSR) -> 读取 pci 条并配置 fpga 应从probe() 调用此 API 在调用 qdma_user_isr_enable() 之前，不会启用用户中断
+        if (xpriv->pinfo->poll_mode)
+        qdma_device_open
+            xdev = xdev_find_by_pdev(pdev) -> list_for_each_entry_safe(xdev, tmp, &xdev_list, list_head) <- list_add_tail(&xdev->list_head, &xdev_list)
+            pci_request_regions -> 将与 PCI 设备 pdev 关联的所有 PCI 区域标记为由所有者 res_name 保留。 除非此调用成功返回，否则不要访问 PCI 区域内的任何地址。
+            pci_enable_device -> 在驱动程序使用设备之前初始化设备。 要求低级代码启用 I/O 和内存
+            pci_enable_relaxed_ordering -> 相比PCI, PCIe则深得中庸之道，更加善解人意。PCIe支持的Relaxed Ordering的传递规则不会要求TLPs严格遵守先来后到，也意味着根据轻重缓急找到最佳的方案，提高数据的传输效率 -> https://www.163.com/dy/article/HID20SNS0511L4FD.html
+                pcie_capability_set_word(pdev, PCI_EXP_DEVCTL, PCI_EXP_DEVCTL_RELAX_EN) -> Enable relaxed ordering -> pci_regs.h
+            pci_enable_extended_tag
+            pci_set_master
+            pci_dma_mask_set
+                pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(64)) -> pci_set_dma_mask()和dma_set_mask()辅助函数用于检查总线是否可以接收给定大小的总线地址(mask)，如果可以，则通知总线层给定的外围设备将使用该大小的总线地址
+            pcie_get_readrq -> 返回最大内存读取请求（以字节为单位）或适当的错误值。
+            xdev = xdev_alloc(conf)
+                xdev = kzalloc(sizeof(struct xlnx_dma_dev), GFP_KERNEL)
+            xdev_flag_set(xdev, XDEV_FLAG_OFFLINE)
+            xdev_list_add
+                list_add_tail(&xdev->list_head, &xdev_list)
+            xdev_map_bars
+                pci_resource_len
+                QDMA_MAX_BAR_LEN_MAPPED -> 64MB 0x4000000, 16K -> QDMA_MIN_BAR_LEN_MAPPED
+                pci_iomap -> 使用此函数，您将获得设备 BAR 的 __iomem 地址。 您可以使用 ioread*() 和 iowrite*() 访问它。 如果这是 MMIO 或 PIO 地址空间，这些函数会隐藏详细信息，并且只会以正确的方式执行您期望的操作。, maxlen 指定要映射的最大长度。 如果您想访问完整的 BAR 而不首先检查其长度，请在此处传递 0
+            __QDMA_VF__
+            qdma_hw_access_init
+                qdma_is_config_bar
+                hw_access->qdma_init_ctxt_memory = &qdma_init_ctxt_memory
+                ...
+                hw_access->qdma_get_version(dev_hndl, is_vf, &version_info)
+                ...
+            qdma_device_attributes_get -> qdma_get_device_attributes
+            qdma_master_resource_create pci_bus_max_busnr -> 给定 PCI 总线，返回集合中存在的最高 PCI 总线编号，包括给定 PCI 总线及其子 PCI 总线列表
+                qdma_find_master_resource_entry -> master_resource_list
+                qdma_list_add_tail(&q_resource->node, &master_resource_list)
+            qdma_dev_qinfo_get
+                qdma_get_dev_entry
+            qdma_dev_entry_create
+            qdma_dev_update
+                qdma_request_q_resource
+                    qdma_submit_to_free_list
+                    qdma_get_resource_node
+            qdma_device_online
+                xdev_check_hndl(__func__, pdev, dev_hndl)
+                intr_setup(xdev)
+                    num_vecs = pci_msix_vec_count(xdev->conf.pdev)
+                    #if KERNEL_VERSION(4, 12, 0) <= LINUX_VERSION_CODE -> kernel version
+                    pci_enable_msix_exact
+                    or pci_enable_msix
+                qdma_mbox_init
+                    INIT_WORK(&mbox->tx_work, mbox_tx_work)
+                qdma_device_init
+                qdma_device_interrupt_setup
+                qdma_mbox_start
+                INIT_DELAYED_WORK(&xdev->err_mon, qdma_err_mon)
+                qdma_mbox_msg_alloc
+                qdma_mbox_compose_pf_reset_done_message
+                qdma_mbox_msg_send
+            xdev_identify_bars
+            dbgfs_dev_init
+        onic_qdma_csr_index_setup
+    Map the User BAR
+    bar_start = pci_resource_start(pdev, pinfo->user_bar)
+    xpriv->bar_base = ioremap(bar_start, bar_len)
+    onic_enable_cmac
+    onic_init_reta
+    register_netdev
+    netif_carrier_off
+
+
+
+static const struct net_device_ops onic_netdev_ops = {
+    .ndo_open = onic_open,
+    .ndo_stop = onic_stop,
+    .ndo_start_xmit = onic_start_xmit,
+    .ndo_set_mac_address = onic_set_mac_address,
+    .ndo_do_ioctl = onic_do_ioctl,
+    .ndo_change_mtu = onic_change_mtu,
+    .ndo_get_stats64 = onic_get_stats64
+};        
+onic_open
+    netdev_priv
+    onic_stats_alloc
+    onic_qdma_rx_queue_setup
+        onic_qdma_rx_queue_add
+        netif_napi_add(xpriv->netdev, &xpriv->napi[q_no], onic_rx_poll, ONIC_NAPI_WEIGHT)
+            qdma_queue_service
+            napi_complete(napi)
+            qdma_queue_c2h_peek
+            qdma_queue_update_pointers
+            napi_reschedule
+    onic_qdma_tx_queue_setup
+    onic_qdma_start
+        qdma_queue_start
+            qdma_thread_add_work
+                list_add_tail(&descq->cmplthp_list, &thp->work_list)
+    napi_enable				
+    napi_schedule
+    netif_tx_start_all_queues
+    netif_carrier_on -> 网络适配器硬件电路可以检测出链路上是否有载波，载波反映了网络的连接是否正常。网络设备驱动可以通过 netif_carrier_on() 和 netif_carrier_off() 函数改变设备的连接状态，如果驱动检测到连接状态发生变化，也应该以 netif_carrier_on() 和 netif_carrier_off() 函数显式地通知内核
+
+
+仿真框架支持自测试和回归测试。 激励、控制元数据和黄金数据(合格判据)是由 python 脚本 packet_gen.py 生成的。 用户可以指定自己的json文件在./sim/testcases文件夹下生成一组新的测试。 测试平台将自动读取这些生成的文件并以 AXI 流格式和其他控制相关信号构建数据包。 仿真框架可以支持xsim和questasim。
+在运行仿真之前，您必须将“VIVADO_DIR”和仿真库目录“COMPILED_LIB_DIR”（仅限 Questasim）导出到您的环境中。 如果您不知道如何为 Vivado 编译仿真库，请按照此链接中的说明进行操作。
+Hardware Simulation -> 硬件仿真
+cd sim/
+python run_testcase.py -roce -tc read_2rdma -gui -> __main__
+    sim_tool = 'xsim'
+    tc_dir = testcases
+    test = testcaseClass(sim_tool, testcase_rootpath, is_roce, is_debug, skip_pktgen, skip_sim, gui, sys.argv[idx_tc+1])
+        self.line_rate   = 40 -> 40Gbps
+        self.explore_testcases()
+             self.run_testcase(tc_name)
+                 config_file = glob.glob(pjoin(tc_dir, '*.json')) -> sim/testcases/read_2rdma/read_2rdma.json
+                if(top_module == 'cl_tb_top') -> 计算逻辑仿真
+                else
+                    pkt_gen = packet_gen.GenEthClass(config_file)
+                    or pkt_gen = packet_gen.GenRoCEClass(config_file, debug=True, debug_path=tc_dir)
+                        self.eth_dst_seed     = '10:20:30:40:50:60'
+                        parse_json_config
+                        gen_rdma_configurations
+                             mac_dst_lsb, mac_dst_msb = self.get_mac_addr(self.eth_dst_seed)
+                                 mac_lsb = (mac_lst[2]<<24 | mac_lst[3]<<16 | mac_lst[4]<<8 | mac_lst[5])
+                                mac_msb = ((mac_lst[0]<<8) | mac_lst[1]) & 0x0000ffff
+                            get_ip_list -> int32_ip = (ip[3]<<24 | ip[2]<<16 | ip[1]<<8 | ip[0])
+                            gen_rdma_global_csr_config
+                            gen_rdma_perq_csr_config
+                            gen_rdma_mr_per_pd_num
+                            gen_rdma_wqe
+                            get_rdma_per_q_config_addr
+                            self.write2file(debug_fname, '', helper_lst, mode='a')
+                        self.gen_rdma_init_mem(self.num_pkts)
+                        gen_non_roce_packets
+                        gen_noise_roce_packets
+                    pkt_gen.write2file(rdma_sys_fname, mem_hdr_str, pkt_gen.rdma_init_sys_mem)
+                    pkt_gen.write_pkts2file
+                self.start_simulation(tc_name, self.sim_tool, sim_path, top_module, self.gui)
+                    os.system(f'./simulate.sh -top {top_module} -g {gui} -t {tc_name} -s {sim_tool}') -> ./simulate.sh -top rn_tb_2rdma_top -g off -t read_2rdma -s xsim
+                    simulate.sh
+                        run_xsim
+                            copy_test_data
+                            source xsim_compile.do 2>&1 | tee -a xsim_compile.log
+                                vlib $USER_LIB/reco
+                                vmap axi_bram_ctrl_v4_1_6 $USER_LIB/axi_bram_ctrl_v4_1_6
+                                vlog -work xilinx_vip -64 -incr -mfcu -sv -L ernic_v3_1_1 "+incdir+$XVIP_PATH/include" \
+                                vcom -work lib_bmg_v1_0_14 -64 -93 \ -> https://support.xilinx.com/s/question/0D52E00006zx9oKSAQ/vivado-modelsim%E8%81%94%E5%90%88%E4%BB%BF%E7%9C%9F%E7%BC%96%E8%AF%91%E5%87%BA%E7%8E%B0%E5%A4%A7%E9%87%8Ferror?language=ja, Vivado ModelSim联合仿真，编译出现大量error
+                            xelab --incr
+                            xsim -g $top_module_opt -key {Behavioral:sim_1:Functional:${top_module_name}} -tclbatch xsim_tb_top.tcl -log xsim_simulate.log -> Vivado关联Modelsim进行仿真, https://blog.csdn.net/weixin_42837669/article/details/107829499
+
+
+xb@bin1:~/project/rdma/RecoNIC/sim$ python3 run_testcase.py -roce -tc read_2rdma
+INFO:run_testcase:Running testcase read_2rdma
+INFO:run_testcase:Testing directory: /home/xb/project/rdma/RecoNIC/sim/testcases/read_2rdma
+INFO:run_testcase:config_file = /home/xb/project/rdma/RecoNIC/sim/testcases/read_2rdma/read_2rdma.json
+INFO:run_testcase:Constructing RDMA packets - Only support RoCEv2 protocol
+INFO:run_testcase.packet_gen:Generating RDMA configurations
+INFO:run_testcase.packet_gen:num_flows=1
+INFO:run_testcase.packet_gen:self.ip_src = 5130
+INFO:run_testcase.packet_gen:Generating RDMA global CSR configuration
+INFO:run_testcase.packet_gen:Generating RDMA per-queue CSR configuration
+INFO:run_testcase.packet_gen:RDMA per-queue CSR configuration generation is done
+INFO:run_testcase.packet_gen:Generating RDMA per-pd_num memory registration configuration
+INFO:run_testcase.packet_gen:RDMA per-pd_num memory region configuration generation is done
+INFO:run_testcase.packet_gen:RDMA per-queue CSR configuration generation is done
+INFO:run_testcase.packet_gen:Payload is stored at the device memory
+INFO:run_testcase.packet_gen:A RDMA WQE is generated
+INFO:run_testcase.packet_gen:Generating non-roce packets
+INFO:run_testcase:Simulating rn_tb_2rdma_top with the xsim simulator
+simulate.sh - RecoNIC simulation with RoCEv2 packets
+INFO: Start xsim simulation
+current director: /home/xb/project/rdma/RecoNIC/sim/scripts
+INFO: testcase data path: /home/xb/project/rdma/RecoNIC/sim/testcases/read_2rdma
+xsim_compile.do: line 6: VIVADO_DIR: unbound variable
+INFO:run_testcase:Finished simulation for read_2rdma
+INFO:run_testcase:Simulation finished
+INFO:run_testcase:Finished testcase read_2rdma
+
+
+
+vcs编译工具
+vlogan分析verilog语言
+vhdlan分析vhdl语言
+vcom用来生成库文件
+
+
+
+test, examples, register
+write_batch.c -> main
+    sockfd = socket(AF_INET, SOCK_STREAM, 0)
+    convert_ip_addr_to_uint
+    src_mac = get_mac_addr_from_str_ip(sockfd, src_ip_str)
+    create_rn_dev
+    create_rdma_dev
+    allocate_rdma_buffer
+    rq_cidb_addr = cidb_buffer->dma_addr + (num_qp<<2) -> 为 CQ 和 RQ 的 CIDB 缓冲区分配一个大页。 它们共享相同的hugepage，cidb是32位的，每个队列对都会有cq_cidb和rq_cidb。 因此，我们将 rq_cidb_addr 的基地址设置为 cq_cidb_addr + (num_qp<<2)
+    open_rdma_dev
+    allocate_rdma_pd
+    fpga_fd = open(device, O_RDWR)
+    allocate_rdma_qp
+        allocate_rdma_buffer
+            get_buffer_paddr
+                get_page_frame_number_of_address
+                    FILE *pagemap = fopen("/proc/self/pagemap", "rb")
+                    page_frame_number &= 0x7FFFFFFFFFFFFF
+    config_last_rq_psn
+    config_sq_psn
+    rdma_post_batch_send
+

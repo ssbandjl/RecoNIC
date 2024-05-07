@@ -212,7 +212,7 @@ if [[ $simulator == "questasim" ]]; then
   echo "INFO: Start questasim simulation"
   run_questasim $testcase $gui $top_module
 elif [[ $simulator == "xsim" ]]; then
-  echo "INFO: Start xsim simulation"
+  echo "INFO: Start xsim simulation, run_xsim $testcase $gui $top_module"
   run_xsim $testcase $gui $top_module
 else
   echo "ERROR: Simulator not supported. Please use either questasim or xsim"
